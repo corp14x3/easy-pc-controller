@@ -40,10 +40,19 @@ def list_applications():
     """Açık uygulamaları listele"""
     try:
         apps = []
+        # Steam oyunlarını ve sistem süreçlerini filtrele
+        excluded_names = ['steam', 'steamwebhelper', 'steamerrorrepor', 'steamservice', 
+                         'System', 'Registry', 'Idle', 'svchost', 'csrss', 'wininit']
+        
         for proc in psutil.process_iter(['pid', 'name', 'exe']):
             try:
                 pinfo = proc.info
-                if pinfo['name'] and pinfo['name'] not in ['System', 'Registry', 'Idle']:
+                if pinfo['name']:
+                    # Filtreleme
+                    name_lower = pinfo['name'].lower()
+                    if any(excluded in name_lower for excluded in excluded_names):
+                        continue
+                    
                     # Windows için pencere kontrolü
                     if IS_WINDOWS:
                         try:
@@ -361,6 +370,72 @@ def set_audio_device():
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+@app.route('/api/media/info', methods=['GET'])
+def get_media_info():
+    """Şu an çalan medya bilgisini al"""
+    try:
+        if IS_WINDOWS:
+            # Windows için Media Session API kullan
+            try:
+                from winsdk.windows.media.control import GlobalSystemMediaTransportControlsSessionManager
+                
+                async def get_media_info_async():
+                    sessions = await GlobalSystemMediaTransportControlsSessionManager.request_async()
+                    current_session = sessions.get_current_session()
+                    if current_session:
+                        info = await current_session.try_get_media_properties_async()
+                        playback = current_session.get_playback_info()
+                        
+                        return {
+                            'title': info.title or '',
+                            'artist': info.artist or '',
+                            'album': info.album_title or '',
+                            'thumbnail': info.thumbnail.to_string() if info.thumbnail else None,
+                            'is_playing': playback.playback_status == 4  # 4 = Playing
+                        }
+                    return None
+                
+                import asyncio
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                media_info = loop.run_until_complete(get_media_info_async())
+                loop.close()
+                
+                if media_info:
+                    return jsonify({
+                        'status': 'success',
+                        'media': media_info
+                    })
+            except Exception as e:
+                print(f"Windows media error: {e}")
+        else:
+            # Linux için playerctl kullan
+            try:
+                result = subprocess.run(['playerctl', 'metadata', '--format', 
+                                       '{{title}}|||{{artist}}|||{{album}}|||{{status}}'],
+                                      capture_output=True, text=True, timeout=2)
+                if result.returncode == 0:
+                    parts = result.stdout.strip().split('|||')
+                    return jsonify({
+                        'status': 'success',
+                        'media': {
+                            'title': parts[0] if len(parts) > 0 else '',
+                            'artist': parts[1] if len(parts) > 1 else '',
+                            'album': parts[2] if len(parts) > 2 else '',
+                            'is_playing': parts[3].lower() == 'playing' if len(parts) > 3 else False,
+                            'thumbnail': None
+                        }
+                    })
+            except:
+                pass
+        
+        return jsonify({
+            'status': 'success',
+            'media': None
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 @app.route('/api/media/control', methods=['POST'])
 def media_control():
     """Medya kontrolü (play, pause, next, previous)"""
@@ -503,14 +578,19 @@ def save_config_endpoint():
 @app.route('/api/system/info', methods=['GET'])
 def system_info():
     """Sistem bilgilerini al"""
+    os_type = platform.system()
+    shell_type = 'cmd' if IS_WINDOWS else 'bash'
+    
     return jsonify({
         'status': 'success',
         'info': {
-            'os': platform.system(),
+            'os': os_type,
             'os_version': platform.version(),
             'hostname': platform.node(),
             'cpu': platform.processor(),
-            'python_version': platform.python_version()
+            'python_version': platform.python_version(),
+            'shell_type': shell_type,
+            'available_shells': ['cmd', 'powershell'] if IS_WINDOWS else ['bash']
         }
     })
 

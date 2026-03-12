@@ -17,18 +17,44 @@ export default function TerminalScreen() {
   const [output, setOutput] = useState('');
   const [shellType, setShellType] = useState('cmd');
   const [osType, setOsType] = useState('Windows');
+  const [availableShells, setAvailableShells] = useState(['cmd']);
 
   useEffect(() => {
-    loadOSType();
+    loadSystemInfo();
   }, []);
 
-  const loadOSType = async () => {
-    const os = await AsyncStorage.getItem('os_type');
-    if (os) {
-      setOsType(os);
-      if (os === 'Linux') {
-        setShellType('bash');
+  const loadSystemInfo = async () => {
+    try {
+      // Önce AsyncStorage'dan kontrol et
+      const savedOS = await AsyncStorage.getItem('os_type');
+      const savedShell = await AsyncStorage.getItem('shell_type');
+      
+      if (savedOS && savedShell) {
+        setOsType(savedOS);
+        setShellType(savedShell);
+        
+        // Available shells'i ayarla
+        if (savedOS === 'Windows') {
+          setAvailableShells(['cmd', 'powershell']);
+        } else {
+          setAvailableShells(['bash']);
+        }
+      } else {
+        // API'den al
+        await api.initialize();
+        const response = await api.getSystemInfo();
+        if (response.status === 'success') {
+          setOsType(response.info.os);
+          setShellType(response.info.shell_type);
+          setAvailableShells(response.info.available_shells || ['cmd']);
+          
+          // Kaydet
+          await AsyncStorage.setItem('os_type', response.info.os);
+          await AsyncStorage.setItem('shell_type', response.info.shell_type);
+        }
       }
+    } catch (error) {
+      console.log('Sistem bilgisi alınamadı');
     }
   };
 
@@ -51,17 +77,32 @@ export default function TerminalScreen() {
 
   const shutdownPC = () => {
     Alert.alert(
-      'Onay',
+      'Onay Gerekli',
       'Bilgisayarı kapatmak istediğinize emin misiniz?',
       [
         { text: 'İptal', style: 'cancel' },
         {
-          text: 'Kapat',
+          text: 'Evet, Kapat',
+          style: 'destructive',
+          onPress: () => confirmShutdown(),
+        },
+      ]
+    );
+  };
+
+  const confirmShutdown = () => {
+    Alert.alert(
+      '⚠️ SON ONAY',
+      'Bu işlem geri alınamaz! Bilgisayar kapanacak.',
+      [
+        { text: 'İptal', style: 'cancel' },
+        {
+          text: 'KAPAT',
           style: 'destructive',
           onPress: async () => {
             try {
               await api.shutdownSystem();
-              Alert.alert('Başarılı', 'Bilgisayar kapatılıyor...');
+              Alert.alert('✅', 'Bilgisayar kapatılıyor...');
             } catch (error) {
               Alert.alert('Hata', 'Bilgisayar kapatılamadı');
             }
@@ -73,17 +114,32 @@ export default function TerminalScreen() {
 
   const restartPC = () => {
     Alert.alert(
-      'Onay',
+      'Onay Gerekli',
       'Bilgisayarı yeniden başlatmak istediğinize emin misiniz?',
       [
         { text: 'İptal', style: 'cancel' },
         {
-          text: 'Yeniden Başlat',
+          text: 'Evet, Yeniden Başlat',
+          style: 'destructive',
+          onPress: () => confirmRestart(),
+        },
+      ]
+    );
+  };
+
+  const confirmRestart = () => {
+    Alert.alert(
+      '⚠️ SON ONAY',
+      'Bu işlem geri alınamaz! Bilgisayar yeniden başlayacak.',
+      [
+        { text: 'İptal', style: 'cancel' },
+        {
+          text: 'YENİDEN BAŞLAT',
           style: 'destructive',
           onPress: async () => {
             try {
               await api.restartSystem();
-              Alert.alert('Başarılı', 'Bilgisayar yeniden başlatılıyor...');
+              Alert.alert('✅', 'Bilgisayar yeniden başlatılıyor...');
             } catch (error) {
               Alert.alert('Hata', 'Bilgisayar yeniden başlatılamadı');
             }
@@ -107,32 +163,47 @@ export default function TerminalScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* Shell Type Selector */}
-      {osType === 'Windows' && (
+      {/* Shell Type Selector (sadece Windows için) */}
+      {availableShells.length > 1 && (
         <View style={styles.shellSelector}>
-          <TouchableOpacity
-            style={[styles.shellButton, shellType === 'cmd' && styles.shellButtonActive]}
-            onPress={() => setShellType('cmd')}
-          >
-            <Text style={[styles.shellButtonText, shellType === 'cmd' && styles.shellButtonTextActive]}>
-              CMD
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.shellButton, shellType === 'powershell' && styles.shellButtonActive]}
-            onPress={() => setShellType('powershell')}
-          >
-            <Text style={[styles.shellButtonText, shellType === 'powershell' && styles.shellButtonTextActive]}>
-              PowerShell
-            </Text>
-          </TouchableOpacity>
+          {availableShells.map((shell) => (
+            <TouchableOpacity
+              key={shell}
+              style={[
+                styles.shellButton,
+                shellType === shell && styles.shellButtonActive,
+              ]}
+              onPress={() => setShellType(shell)}
+            >
+              <Text
+                style={[
+                  styles.shellButtonText,
+                  shellType === shell && styles.shellButtonTextActive,
+                ]}
+              >
+                {shell.toUpperCase()}
+              </Text>
+            </TouchableOpacity>
+          ))}
         </View>
       )}
+
+      {/* System Info */}
+      <View style={styles.systemInfo}>
+        <Ionicons 
+          name={osType === 'Windows' ? 'logo-windows' : 'logo-tux'} 
+          size={16} 
+          color="#0099ff" 
+        />
+        <Text style={styles.systemInfoText}>
+          {osType} - {shellType}
+        </Text>
+      </View>
 
       {/* Output */}
       <ScrollView style={styles.output}>
         <Text style={styles.outputText}>
-          {output || 'Komut çıktısı burada görünecek...'}
+          {output || `Komut çıktısı burada görünecek...\n\nŞu an: ${osType} - ${shellType}`}
         </Text>
       </ScrollView>
 
@@ -217,6 +288,21 @@ const styles = StyleSheet.create({
   },
   shellButtonTextActive: {
     color: '#fff',
+  },
+  systemInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    backgroundColor: '#1a1a1a',
+    borderBottomWidth: 1,
+    borderBottomColor: '#333',
+  },
+  systemInfoText: {
+    color: '#0099ff',
+    fontSize: 12,
+    fontWeight: '600',
   },
   output: {
     flex: 1,

@@ -15,8 +15,8 @@ import api from './../utils/api';
 export default function SettingsScreen() {
   const [serverIP, setServerIP] = useState('');
   const [serverPort, setServerPort] = useState('5000');
-  const [osType, setOSType] = useState('Windows');
   const [isConnected, setIsConnected] = useState(false);
+  const [systemInfo, setSystemInfo] = useState(null);
 
   useEffect(() => {
     loadSettings();
@@ -26,13 +26,11 @@ export default function SettingsScreen() {
     try {
       const ip = await AsyncStorage.getItem('server_ip');
       const port = await AsyncStorage.getItem('server_port');
-      const os = await AsyncStorage.getItem('os_type');
 
       if (ip) setServerIP(ip);
       if (port) setServerPort(port);
-      if (os) setOSType(os);
 
-      // Check connection
+      // Check connection and get system info
       if (ip && port) {
         checkConnection();
       }
@@ -44,10 +42,20 @@ export default function SettingsScreen() {
   const checkConnection = async () => {
     try {
       await api.initialize();
-      const response = await api.checkHealth();
-      setIsConnected(response.status === 'ok');
+      const healthResponse = await api.checkHealth();
+      setIsConnected(healthResponse.status === 'ok');
+      
+      // Get system info (OS, shell type)
+      const infoResponse = await api.getSystemInfo();
+      if (infoResponse.status === 'success') {
+        setSystemInfo(infoResponse.info);
+        // OS bilgisini kaydet
+        await AsyncStorage.setItem('os_type', infoResponse.info.os);
+        await AsyncStorage.setItem('shell_type', infoResponse.info.shell_type);
+      }
     } catch (error) {
       setIsConnected(false);
+      setSystemInfo(null);
     }
   };
 
@@ -60,7 +68,6 @@ export default function SettingsScreen() {
     try {
       await AsyncStorage.setItem('server_ip', serverIP);
       await AsyncStorage.setItem('server_port', serverPort);
-      await AsyncStorage.setItem('os_type', osType);
       
       await api.setServer(serverIP, serverPort);
       await checkConnection();
@@ -82,8 +89,11 @@ export default function SettingsScreen() {
       const response = await api.checkHealth();
       
       if (response.status === 'ok') {
-        setIsConnected(true);
-        Alert.alert('Başarılı', `Bağlantı başarılı!\nOS: ${response.os}`);
+        await checkConnection();
+        Alert.alert(
+          'Başarılı', 
+          `Bağlantı başarılı!\n\nİşletim Sistemi: ${systemInfo?.os || 'Bilinmiyor'}\nShell: ${systemInfo?.shell_type || 'Bilinmiyor'}`
+        );
       }
     } catch (error) {
       setIsConnected(false);
@@ -104,6 +114,23 @@ export default function SettingsScreen() {
               {isConnected ? 'Bağlı' : 'Bağlantı Yok'}
             </Text>
           </View>
+          {systemInfo && isConnected && (
+            <View style={styles.systemInfoContainer}>
+              <View style={styles.systemInfoRow}>
+                <Ionicons 
+                  name={systemInfo.os === 'Windows' ? 'logo-windows' : 'logo-tux'} 
+                  size={20} 
+                  color="#0099ff" 
+                />
+                <Text style={styles.systemInfoText}>
+                  {systemInfo.os} ({systemInfo.shell_type})
+                </Text>
+              </View>
+              <Text style={styles.systemInfoSubText}>
+                {systemInfo.hostname}
+              </Text>
+            </View>
+          )}
         </View>
 
         {/* Server IP */}
@@ -131,37 +158,6 @@ export default function SettingsScreen() {
           keyboardType="numeric"
         />
 
-        {/* OS Selection */}
-        <Text style={styles.label}>İşletim Sistemi</Text>
-        <View style={styles.osSelector}>
-          <TouchableOpacity
-            style={[styles.osButton, osType === 'Windows' && styles.osButtonActive]}
-            onPress={() => setOSType('Windows')}
-          >
-            <Ionicons 
-              name="logo-windows" 
-              size={24} 
-              color={osType === 'Windows' ? '#fff' : '#666'} 
-            />
-            <Text style={[styles.osButtonText, osType === 'Windows' && styles.osButtonTextActive]}>
-              Windows
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.osButton, osType === 'Linux' && styles.osButtonActive]}
-            onPress={() => setOSType('Linux')}
-          >
-            <Ionicons 
-              name="logo-tux" 
-              size={24} 
-              color={osType === 'Linux' ? '#fff' : '#666'} 
-            />
-            <Text style={[styles.osButtonText, osType === 'Linux' && styles.osButtonTextActive]}>
-              Linux
-            </Text>
-          </TouchableOpacity>
-        </View>
-
         {/* Buttons */}
         <TouchableOpacity style={styles.saveButton} onPress={saveSettings}>
           <Ionicons name="save" size={24} color="#fff" />
@@ -183,6 +179,9 @@ export default function SettingsScreen() {
           <Text style={styles.instructionStep}>3️⃣ Yukarıdaki ayarlara IP ve port'u girin</Text>
           <Text style={styles.instructionStep}>4️⃣ "Ayarları Kaydet" butonuna basın</Text>
           <Text style={styles.instructionStep}>5️⃣ "Bağlantıyı Test Et" ile kontrol edin</Text>
+          <Text style={styles.instructionNote}>
+            ℹ️ İşletim sistemi ve shell tipi otomatik olarak algılanır
+          </Text>
         </View>
       </View>
 
@@ -239,6 +238,28 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
   },
+  systemInfoContainer: {
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#333',
+  },
+  systemInfoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 4,
+  },
+  systemInfoText: {
+    color: '#0099ff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  systemInfoSubText: {
+    color: '#666',
+    fontSize: 12,
+    marginTop: 4,
+  },
   label: {
     color: '#fff',
     fontSize: 16,
@@ -260,34 +281,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 8,
     fontStyle: 'italic',
-  },
-  osSelector: {
-    flexDirection: 'row',
-    gap: 12,
-  },
-  osButton: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    padding: 16,
-    borderRadius: 12,
-    backgroundColor: '#1a1a1a',
-    borderWidth: 1,
-    borderColor: '#333',
-  },
-  osButtonActive: {
-    backgroundColor: '#0099ff',
-    borderColor: '#0099ff',
-  },
-  osButtonText: {
-    color: '#666',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  osButtonTextActive: {
-    color: '#fff',
   },
   saveButton: {
     flexDirection: 'row',
@@ -333,6 +326,12 @@ const styles = StyleSheet.create({
     fontSize: 14,
     marginBottom: 8,
     lineHeight: 20,
+  },
+  instructionNote: {
+    color: '#0099ff',
+    fontSize: 13,
+    marginTop: 8,
+    fontStyle: 'italic',
   },
   aboutText: {
     color: '#666',
