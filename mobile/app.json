@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "PC Controller",
+    "slug": "pc-controller-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "pccontroller",
+    "platforms": [
+      "ios",
+      "android",
+      "web"
+    ],
+    "android": {
+      "package": "com.pccontroller.mobile"
+    },
+    "plugins": [
+      "expo-font"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "4a4ab213-c533-4587-8d90-9fccec564915"
+      }
+    }
+  }
+}
