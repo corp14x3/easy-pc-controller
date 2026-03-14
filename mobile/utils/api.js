@@ -96,6 +96,11 @@ class APIClient {
     return response.data;
   }
 
+  async getMediaInfo() {
+    const response = await this.client.get('/api/media/info');
+    return response.data;
+  }
+
   // System
   async shutdownSystem() {
     const response = await this.client.post('/api/system/shutdown');

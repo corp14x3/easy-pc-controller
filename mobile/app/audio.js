@@ -6,7 +6,6 @@ import {
   TouchableOpacity,
   ScrollView,
   Alert,
-  Image,
   Modal,
 } from 'react-native';
 import Slider from '@react-native-community/slider';
@@ -22,9 +21,14 @@ export default function AudioScreen() {
   const [showInputMenu, setShowInputMenu] = useState(false);
 
   useEffect(() => {
-    loadAudioStatus();
-    loadDevices();
-    loadMediaInfo();
+    const loadAll = async () => {
+      await api.initialize();
+      await loadAudioStatus();
+      await loadDevices();
+      await loadMediaInfo();
+    };
+    
+    loadAll();
     
     // Her 3 saniyede bir medya bilgisini güncelle
     const interval = setInterval(loadMediaInfo, 3000);
@@ -33,36 +37,39 @@ export default function AudioScreen() {
 
   const loadAudioStatus = async () => {
     try {
-      await api.initialize();
       const response = await api.getVolume();
       if (response.status === 'success') {
         setVolume(response.volume);
         setMuted(response.muted);
       }
     } catch (error) {
-      Alert.alert('Hata', 'Ses durumu yüklenemedi');
+      console.error('Ses durumu hatası:', error);
     }
   };
 
   const loadDevices = async () => {
     try {
       const response = await api.getAudioDevices();
+      console.log('Cihazlar:', response);
       if (response.status === 'success') {
         setDevices(response.devices);
+        console.log('Output:', response.devices.output.length, 'Input:', response.devices.input.length);
       }
     } catch (error) {
-      console.log('Cihazlar yüklenemedi');
+      console.error('Cihaz yükleme hatası:', error);
     }
   };
 
   const loadMediaInfo = async () => {
     try {
       const response = await api.getMediaInfo();
-      if (response.status === 'success') {
+      if (response?.status === 'success' && response.media) {
         setMediaInfo(response.media);
+      } else {
+        setMediaInfo(null);
       }
     } catch (error) {
-      console.log('Medya bilgisi alınamadı');
+      setMediaInfo(null);
     }
   };
 
@@ -71,7 +78,7 @@ export default function AudioScreen() {
     try {
       await api.setVolume(Math.round(value));
     } catch (error) {
-      console.log('Ses seviyesi değiştirilemedi');
+      console.error('Ses seviyesi hatası:', error);
     }
   };
 
@@ -80,6 +87,7 @@ export default function AudioScreen() {
       await api.toggleMute();
       setMuted(!muted);
     } catch (error) {
+      console.error('Mute hatası:', error);
       Alert.alert('Hata', 'Ses kapatılamadı');
     }
   };
@@ -90,7 +98,7 @@ export default function AudioScreen() {
       // Medya bilgisini hemen güncelle
       setTimeout(loadMediaInfo, 500);
     } catch (error) {
-      Alert.alert('Hata', 'Medya kontrol edilemedi');
+      console.error('Medya kontrol hatası:', error);
     }
   };
 
@@ -101,6 +109,7 @@ export default function AudioScreen() {
       setShowInputMenu(false);
       Alert.alert('Başarılı', 'Cihaz değiştirildi');
     } catch (error) {
+      console.error('Cihaz değiştirme hatası:', error);
       Alert.alert('Hata', 'Cihaz değiştirilemedi');
     }
   };
@@ -112,12 +121,6 @@ export default function AudioScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Şu An Çalıyor</Text>
           <View style={styles.mediaCard}>
-            {mediaInfo.thumbnail && (
-              <Image 
-                source={{ uri: mediaInfo.thumbnail }} 
-                style={styles.mediaThumbnail}
-              />
-            )}
             <View style={styles.mediaInfo}>
               <Text style={styles.mediaTitle} numberOfLines={1}>
                 {mediaInfo.title || 'Bilinmeyen'}
@@ -187,15 +190,13 @@ export default function AudioScreen() {
           </TouchableOpacity>
           <TouchableOpacity
             style={[styles.mediaButton, styles.playButton]}
-            onPress={() => controlMedia('play')}
+            onPress={() => controlMedia(mediaInfo?.is_playing ? 'pause' : 'play')}
           >
-            <Ionicons name="play" size={32} color="#fff" />
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.mediaButton}
-            onPress={() => controlMedia('pause')}
-          >
-            <Ionicons name="pause" size={28} color="#fff" />
+            <Ionicons 
+              name={mediaInfo?.is_playing ? 'pause' : 'play'} 
+              size={32} 
+              color="#fff" 
+            />
           </TouchableOpacity>
           <TouchableOpacity
             style={styles.mediaButton}
@@ -216,7 +217,7 @@ export default function AudioScreen() {
           onPress={() => setShowOutputMenu(true)}
         >
           <Ionicons name="headset" size={24} color="#0099ff" />
-          <Text style={styles.deviceSelectorText}>Hoparlör / Kulaklık</Text>
+          <Text style={styles.deviceSelectorText}>Hoparlör / Kulaklık ({devices.output.length})</Text>
           <Ionicons name="chevron-forward" size={24} color="#666" />
         </TouchableOpacity>
 
@@ -226,7 +227,7 @@ export default function AudioScreen() {
           onPress={() => setShowInputMenu(true)}
         >
           <Ionicons name="mic" size={24} color="#0099ff" />
-          <Text style={styles.deviceSelectorText}>Mikrofon</Text>
+          <Text style={styles.deviceSelectorText}>Mikrofon ({devices.input.length})</Text>
           <Ionicons name="chevron-forward" size={24} color="#666" />
         </TouchableOpacity>
       </View>
@@ -325,12 +326,6 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     padding: 12,
     gap: 12,
-  },
-  mediaThumbnail: {
-    width: 60,
-    height: 60,
-    borderRadius: 8,
-    backgroundColor: '#333',
   },
   mediaInfo: {
     flex: 1,

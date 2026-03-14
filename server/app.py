@@ -31,6 +31,30 @@ config = load_config()
 IS_WINDOWS = platform.system() == 'Windows'
 IS_LINUX = platform.system() == 'Linux'
 
+def install_audio_module():
+    """AudioDeviceCmdlets modülünü otomatik kur"""
+    if IS_WINDOWS:
+        try:
+            # Modül kurulu mu kontrol et
+            check_cmd = "Get-Module -ListAvailable -Name AudioDeviceCmdlets"
+            result = subprocess.run(['powershell', '-Command', check_cmd], 
+                                   capture_output=True, text=True,
+                                   encoding='utf-8', errors='ignore')
+            
+            if 'AudioDeviceCmdlets' not in result.stdout:
+                print("⏳ AudioDeviceCmdlets modülü kuruluyor...")
+                install_cmd = "Install-Module -Name AudioDeviceCmdlets -Force -Scope CurrentUser"
+                subprocess.run(['powershell', '-Command', install_cmd], 
+                             capture_output=True, encoding='utf-8', errors='ignore')
+                print("✅ AudioDeviceCmdlets modülü kuruldu!")
+            else:
+                print("✅ AudioDeviceCmdlets modülü zaten kurulu")
+        except Exception as e:
+            print(f"⚠️ Modül kurulum hatası (devam ediliyor): {e}")
+
+# Uygulama başlarken modülü kur
+install_audio_module()
+
 # ============================================
 # UYGULAMALAR
 # ============================================
@@ -101,129 +125,308 @@ def list_applications():
 
 @app.route('/api/applications/focus', methods=['POST'])
 def focus_application():
-    """Uygulamayı ön plana getir"""
+    """Uygulamayı ön plana getir - AGRESİF YÖNTEM"""
     try:
         data = request.json
         app_name = data.get('name')
         
         if IS_WINDOWS:
-            ps_command = f"""
-            $processes = Get-Process | Where-Object {{$_.ProcessName -like '*{app_name}*' -and $_.MainWindowHandle -ne 0}} | Select-Object -First 1
-            if ($processes) {{
-                Add-Type @"
-                    using System;
-                    using System.Runtime.InteropServices;
-                    public class WinAPI {{
-                        [DllImport("user32.dll")]
-                        public static extern bool SetForegroundWindow(IntPtr hWnd);
-                        [DllImport("user32.dll")]
-                        public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-                    }}
-"@
-                $handle = $processes.MainWindowHandle
-                [WinAPI]::ShowWindow($handle, 9)
-                [WinAPI]::SetForegroundWindow($handle)
-            }}
-            """
-            subprocess.run(['powershell', '-ExecutionPolicy', 'Bypass', '-Command', ps_command])
-        else:
-            # Linux için wmctrl kullan
-            subprocess.run(['wmctrl', '-a', app_name])
+            # PowerShell ile pencereyi zorla ön plana getir
+            ps_script = f"""
+$processName = "{app_name}".Replace('.exe', '')
+$processes = Get-Process -Name $processName -ErrorAction SilentlyContinue
+
+Add-Type @"
+    using System;
+    using System.Runtime.InteropServices;
+    public class WinAPI {{
+        [DllImport("user32.dll")]
+        public static extern bool SetForegroundWindow(IntPtr hWnd);
         
-        return jsonify({'status': 'success'})
+        [DllImport("user32.dll")]
+        public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+        
+        [DllImport("user32.dll")]
+        public static extern bool IsIconic(IntPtr hWnd);
+        
+        [DllImport("user32.dll")]
+        public static extern bool BringWindowToTop(IntPtr hWnd);
+        
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetForegroundWindow();
+        
+        [DllImport("user32.dll")]
+        public static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr ProcessId);
+        
+        [DllImport("user32.dll")]
+        public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+    }}
+"@
+
+if ($processes) {{
+    foreach ($process in $processes) {{
+        if ($process.MainWindowHandle -ne 0) {{
+            $handle = $process.MainWindowHandle
+            
+            # 1. Minimize ise restore et
+            if ([WinAPI]::IsIconic($handle)) {{
+                [WinAPI]::ShowWindow($handle, 9) | Out-Null
+            }}
+            
+            # 2. Göster
+            [WinAPI]::ShowWindow($handle, 5) | Out-Null
+            
+            # 3. Thread input'ları birleştir (AGRESİF)
+            $foregroundWindow = [WinAPI]::GetForegroundWindow()
+            $foregroundThread = [WinAPI]::GetWindowThreadProcessId($foregroundWindow, [IntPtr]::Zero)
+            $targetThread = [WinAPI]::GetWindowThreadProcessId($handle, [IntPtr]::Zero)
+            
+            if ($foregroundThread -ne $targetThread) {{
+                [WinAPI]::AttachThreadInput($foregroundThread, $targetThread, $true)
+                [WinAPI]::BringWindowToTop($handle) | Out-Null
+                [WinAPI]::SetForegroundWindow($handle) | Out-Null
+                [WinAPI]::AttachThreadInput($foregroundThread, $targetThread, $false)
+            }} else {{
+                [WinAPI]::BringWindowToTop($handle) | Out-Null
+                [WinAPI]::SetForegroundWindow($handle) | Out-Null
+            }}
+            
+            # 4. Tekrar göster (emin olmak için)
+            [WinAPI]::ShowWindow($handle, 5) | Out-Null
+            
+            Write-Output "Focused: $($process.ProcessName)"
+            break
+        }}
+    }}
+}}
+"""
+            
+            result = subprocess.run(
+                ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                encoding='utf-8',
+                errors='ignore'
+            )
+            
+            print(f"[FOCUS] {app_name} → {result.stdout.strip()}")
+            
+            return jsonify({'status': 'success'})
+        else:
+            # Linux
+            subprocess.run(['wmctrl', '-a', app_name])
+            return jsonify({'status': 'success'})
+            
     except Exception as e:
+        print(f"[FOCUS ERROR] {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
 
 @app.route('/api/applications/kill', methods=['POST'])
 def kill_application():
-    """Uygulamayı sonlandır"""
+    """Uygulamayı sonlandır - TASKKILL"""
     try:
         data = request.json
         pid = data.get('pid')
         
-        process = psutil.Process(pid)
-        process.kill()
-        
-        return jsonify({'status': 'success'})
+        if IS_WINDOWS:
+            # CMD taskkill komutu - EN GÜVENİLİR
+            cmd = f"taskkill /F /PID {pid}"
+            result = subprocess.run(
+                cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='ignore'
+            )
+            
+            print(f"[KILL] PID {pid}")
+            print(f"[KILL OUTPUT] {result.stdout}")
+            print(f"[KILL ERROR] {result.stderr}")
+            
+            return jsonify({'status': 'success'})
+        else:
+            # Linux
+            subprocess.run(['kill', '-9', str(pid)])
+            return jsonify({'status': 'success'})
+            
     except Exception as e:
+        print(f"[KILL EXCEPTION] {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+
 @app.route('/api/applications/installed', methods=['GET'])
-def list_installed_applications():
-    """PC'deki kurulu programları listele"""
+def get_installed_applications():
+    """Yüklü uygulamaları listele - STEAM OYUNLARI DAHİL"""
     try:
         apps = []
         
         if IS_WINDOWS:
-            # Windows için registry ve Start Menu kontrolü
             import winreg
             
-            paths = [
+            found_apps = {}
+            
+            # 1. NORMAL UYGULAMALAR (Registry)
+            registry_paths = [
                 r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
                 r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
             ]
             
-            for path in paths:
+            for reg_path in registry_paths:
                 try:
-                    key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path)
-                    for i in range(winreg.QueryInfoKey(key)[0]):
+                    key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path)
+                    
+                    for i in range(0, winreg.QueryInfoKey(key)[0]):
                         try:
                             subkey_name = winreg.EnumKey(key, i)
                             subkey = winreg.OpenKey(key, subkey_name)
+                            
                             try:
                                 name = winreg.QueryValueEx(subkey, "DisplayName")[0]
-                                exe_path = winreg.QueryValueEx(subkey, "DisplayIcon")[0] if "DisplayIcon" in [winreg.EnumValue(subkey, j)[0] for j in range(winreg.QueryInfoKey(subkey)[1])] else None
-                                apps.append({'name': name, 'path': exe_path})
+                                install_location = None
+                                
+                                try:
+                                    install_location = winreg.QueryValueEx(subkey, "InstallLocation")[0]
+                                except:
+                                    pass
+                                
+                                exe_path = None
+                                if install_location and os.path.exists(install_location):
+                                    possible_names = [
+                                        f"{name}.exe",
+                                        f"{name.split()[0]}.exe",
+                                        "app.exe",
+                                        "main.exe",
+                                        "launcher.exe"
+                                    ]
+                                    
+                                    for exe_name in possible_names:
+                                        exe_full_path = os.path.join(install_location, exe_name)
+                                        if os.path.exists(exe_full_path):
+                                            exe_path = exe_full_path
+                                            break
+                                    
+                                    if not exe_path:
+                                        for file in os.listdir(install_location):
+                                            if file.endswith('.exe') and not file.lower().startswith('unins'):
+                                                exe_path = os.path.join(install_location, file)
+                                                break
+                                
+                                # Filtreleme
+                                skip_keywords = [
+                                    'update', 'uninstall', 'installer', 'setup', 'redist',
+                                    'runtime', 'service', 'driver', 'microsoft visual',
+                                    'microsoft .net', 'directx', 'vcredist', 'framework',
+                                    'redistributable', 'components', 'tools', 'sdk'
+                                ]
+                                
+                                name_lower = name.lower()
+                                if any(keyword in name_lower for keyword in skip_keywords):
+                                    continue
+                                
+                                if name and exe_path:
+                                    found_apps[name] = {
+                                        'name': name,
+                                        'path': exe_path,
+                                        'type': 'app'
+                                    }
+                                
                             except:
                                 pass
+                            
                             winreg.CloseKey(subkey)
                         except:
                             pass
+                    
                     winreg.CloseKey(key)
                 except:
                     pass
-        else:
-            # Linux için .desktop dosyalarını tara
-            desktop_paths = [
-                '/usr/share/applications',
-                os.path.expanduser('~/.local/share/applications')
-            ]
             
-            for desktop_path in desktop_paths:
-                if os.path.exists(desktop_path):
-                    for file in os.listdir(desktop_path):
-                        if file.endswith('.desktop'):
+            # 2. STEAM OYUNLARI
+            try:
+                # Steam registry'den oyunları bul
+                steam_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam")
+                steam_path = winreg.QueryValueEx(steam_key, "SteamPath")[0]
+                winreg.CloseKey(steam_key)
+                
+                # steamapps klasörünü kontrol et
+                steamapps_path = os.path.join(steam_path, "steamapps")
+                
+                if os.path.exists(steamapps_path):
+                    # .acf dosyalarını oku (her oyun için bir tane)
+                    for file in os.listdir(steamapps_path):
+                        if file.startswith("appmanifest_") and file.endswith(".acf"):
+                            acf_path = os.path.join(steamapps_path, file)
+                            
                             try:
-                                with open(os.path.join(desktop_path, file), 'r') as f:
+                                with open(acf_path, 'r', encoding='utf-8') as f:
                                     content = f.read()
-                                    name_line = [l for l in content.split('\n') if l.startswith('Name=')]
-                                    exec_line = [l for l in content.split('\n') if l.startswith('Exec=')]
-                                    if name_line and exec_line:
-                                        apps.append({
-                                            'name': name_line[0].replace('Name=', ''),
-                                            'path': exec_line[0].replace('Exec=', '')
-                                        })
-                            except:
+                                    
+                                    # Oyun adını bul
+                                    name_match = content.split('"name"')[1].split('"')[1]
+                                    # App ID'yi bul
+                                    appid_match = content.split('"appid"')[1].split('"')[1]
+                                    
+                                    if name_match and appid_match:
+                                        # Steam URL ile başlat
+                                        steam_url = f"steam://rungameid/{appid_match}"
+                                        
+                                        found_apps[f"🎮 {name_match}"] = {
+                                            'name': f"🎮 {name_match}",
+                                            'path': steam_url,
+                                            'type': 'steam'
+                                        }
+                            except Exception as e:
+                                print(f"Error reading {file}: {e}")
                                 pass
+            except Exception as e:
+                print(f"Steam games error: {e}")
+                pass
+            
+            # Alfabetik sırala
+            apps = sorted(found_apps.values(), key=lambda x: x['name'].lower())
+            
+        else:
+            apps = []
+        
+        print(f"[DEBUG] Found {len(apps)} applications (apps + steam games)")
         
         return jsonify({
             'status': 'success',
-            'applications': apps[:100]  # İlk 100 uygulama
+            'applications': apps
         })
     except Exception as e:
+        print(f"[ERROR] {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
 
 @app.route('/api/applications/launch', methods=['POST'])
 def launch_application():
-    """Uygulama başlat"""
+    """Uygulama başlat - STEAM DESTEKLI"""
     try:
         data = request.json
-        app_path = data.get('path')
+        path = data.get('path')
         
-        if IS_WINDOWS:
-            subprocess.Popen(app_path, shell=True)
+        if path.startswith('steam://'):
+            # Steam oyunu - steam:// URL'sini aç
+            if IS_WINDOWS:
+                os.startfile(path)
+            else:
+                subprocess.Popen(['xdg-open', path])
         else:
-            subprocess.Popen(app_path.split())
+            # Normal uygulama
+            if IS_WINDOWS:
+                subprocess.Popen(path, shell=True)
+            else:
+                subprocess.Popen(path, shell=True)
         
         return jsonify({'status': 'success'})
     except Exception as e:
@@ -235,61 +438,47 @@ def launch_application():
 
 @app.route('/api/audio/volume/get', methods=['GET'])
 def get_volume():
-    """Sistem ses seviyesini al"""
+    """Ses seviyesini al"""
     try:
         if IS_WINDOWS:
-            from ctypes import cast, POINTER
-            from comtypes import CLSCTX_ALL
-            from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+            ps_cmd = """
+$device = Get-AudioDevice -Playback
+[PSCustomObject]@{
+    volume = $device.Volume
+    muted = $device.Mute
+} | ConvertTo-Json -Compress
+"""
+            result = subprocess.run(['powershell', '-Command', ps_cmd],
+                                   capture_output=True, text=True,
+                                   encoding='utf-8', errors='ignore', timeout=3)
             
-            devices = AudioUtilities.GetSpeakers()
-            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-            volume = cast(interface, POINTER(IAudioEndpointVolume))
-            
-            current_volume = volume.GetMasterVolumeLevelScalar() * 100
-            is_muted = volume.GetMute()
-            
-            return jsonify({
-                'status': 'success',
-                'volume': int(current_volume),
-                'muted': bool(is_muted)
-            })
-        else:
-            # Linux için amixer kullan
-            result = subprocess.run(['amixer', 'get', 'Master'], capture_output=True, text=True)
-            volume_line = [l for l in result.stdout.split('\n') if 'Playback' in l and '%' in l][0]
-            volume = int(volume_line.split('[')[1].split('%')[0])
-            is_muted = '[off]' in volume_line
-            
-            return jsonify({
-                'status': 'success',
-                'volume': volume,
-                'muted': is_muted
-            })
+            if result.stdout.strip():
+                data = json.loads(result.stdout.strip())
+                return jsonify({
+                    'status': 'success',
+                    'volume': int(data['volume']),
+                    'muted': data['muted']
+                })
+        
+        return jsonify({'status': 'error', 'message': 'Platform not supported'}), 500
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
+    
 
 @app.route('/api/audio/volume/set', methods=['POST'])
 def set_volume():
-    """Sistem ses seviyesini ayarla"""
+    """Ses seviyesini ayarla"""
     try:
         data = request.json
         volume = data.get('volume', 50)
         
         if IS_WINDOWS:
-            from ctypes import cast, POINTER
-            from comtypes import CLSCTX_ALL
-            from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
-            
-            devices = AudioUtilities.GetSpeakers()
-            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-            volume_interface = cast(interface, POINTER(IAudioEndpointVolume))
-            
-            volume_interface.SetMasterVolumeLevelScalar(volume / 100, None)
-        else:
-            subprocess.run(['amixer', 'set', 'Master', f'{volume}%'])
+            ps_cmd = f"Set-AudioDevice -PlaybackVolume {volume}"
+            subprocess.run(['powershell', '-Command', ps_cmd],
+                          capture_output=True, encoding='utf-8', errors='ignore')
+            return jsonify({'status': 'success'})
         
-        return jsonify({'status': 'success'})
+        return jsonify({'status': 'error', 'message': 'Platform not supported'}), 500
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -298,143 +487,105 @@ def toggle_mute():
     """Sesi aç/kapat"""
     try:
         if IS_WINDOWS:
-            from ctypes import cast, POINTER
-            from comtypes import CLSCTX_ALL
-            from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+            # Mevcut durumu al
+            ps_get = """
+(Get-AudioDevice -Playback).Mute
+"""
+            result = subprocess.run(['powershell', '-Command', ps_get],
+                                   capture_output=True, text=True,
+                                   encoding='utf-8', errors='ignore')
             
-            devices = AudioUtilities.GetSpeakers()
-            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-            volume = cast(interface, POINTER(IAudioEndpointVolume))
+            current_mute = result.stdout.strip().lower() == 'true'
+            new_mute = 'false' if current_mute else 'true'
             
-            current_mute = volume.GetMute()
-            volume.SetMute(not current_mute, None)
-        else:
-            subprocess.run(['amixer', 'set', 'Master', 'toggle'])
+            # Toggle yap
+            ps_set = f"Set-AudioDevice -PlaybackMute ${new_mute}"
+            subprocess.run(['powershell', '-Command', ps_set],
+                          capture_output=True, encoding='utf-8', errors='ignore')
+            
+            return jsonify({'status': 'success'})
         
-        return jsonify({'status': 'success'})
+        return jsonify({'status': 'error', 'message': 'Platform not supported'}), 500
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+
+# =================================================
+# BU KODU app.py'deki /api/audio/devices/list endpoint'inin YERİNE KOY
+# =================================================
+
 @app.route('/api/audio/devices/list', methods=['GET'])
 def list_audio_devices():
-    """Ses cihazlarını listele"""
+    """Ses cihazlarını listele - BASİT YÖNTEM"""
     try:
         devices = {'output': [], 'input': []}
         
         if IS_WINDOWS:
-            from pycaw.pycaw import AudioUtilities
+            # PowerShell ile output devices
+            ps_output = """
+Get-AudioDevice -List | Where-Object {$_.Type -eq "Playback"} | ForEach-Object {
+    "$($_.Index)|$($_.Name)"
+}
+"""
+            result = subprocess.run(['powershell', '-Command', ps_output], 
+                                   capture_output=True, text=True, 
+                                   encoding='utf-8', errors='ignore')
             
-            # Output devices
-            for device in AudioUtilities.GetAllDevices():
-                devices['output'].append({
-                    'id': str(device.id),
-                    'name': device.FriendlyName
-                })
-        else:
-            # Linux için pactl kullan
-            result = subprocess.run(['pactl', 'list', 'sinks', 'short'], capture_output=True, text=True)
-            for line in result.stdout.split('\n'):
-                if line:
-                    parts = line.split('\t')
-                    devices['output'].append({
-                        'id': parts[0],
-                        'name': parts[1]
-                    })
+            for line in result.stdout.strip().split('\n'):
+                if '|' in line:
+                    idx, name = line.split('|', 1)
+                    devices['output'].append({'id': idx.strip(), 'name': name.strip()})
+            
+            # PowerShell ile input devices
+            ps_input = """
+Get-AudioDevice -List | Where-Object {$_.Type -eq "Recording"} | ForEach-Object {
+    "$($_.Index)|$($_.Name)"
+}
+"""
+            result = subprocess.run(['powershell', '-Command', ps_input], 
+                                   capture_output=True, text=True,
+                                   encoding='utf-8', errors='ignore')
+            
+            for line in result.stdout.strip().split('\n'):
+                if '|' in line:
+                    idx, name = line.split('|', 1)
+                    devices['input'].append({'id': idx.strip(), 'name': name.strip()})
         
-        return jsonify({
-            'status': 'success',
-            'devices': devices
-        })
+        print(f"[DEBUG] Output: {len(devices['output'])}, Input: {len(devices['input'])}")
+        
+        return jsonify({'status': 'success', 'devices': devices})
     except Exception as e:
+        print(f"[ERROR] {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# =================================================
+# BU KODU app.py'deki /api/audio/device/set endpoint'inin YERİNE KOY
+# =================================================
 
 @app.route('/api/audio/device/set', methods=['POST'])
 def set_audio_device():
-    """Varsayılan ses cihazını değiştir"""
+    """Ses cihazını değiştir - BASİT YÖNTEM"""
     try:
         data = request.json
         device_id = data.get('device_id')
-        device_type = data.get('type', 'output')  # output veya input
+        device_type = data.get('type')  # 'output' veya 'input'
         
         if IS_WINDOWS:
-            # Windows için PolicyConfig kullanılabilir (kompleks)
-            # Şimdilik basit bir çözüm
-            pass
-        else:
             if device_type == 'output':
-                subprocess.run(['pactl', 'set-default-sink', device_id])
+                # Output cihazını değiştir
+                ps_cmd = f"Set-AudioDevice -Index {device_id}"
             else:
-                subprocess.run(['pactl', 'set-default-source', device_id])
+                # Input cihazını değiştir
+                ps_cmd = f"Set-AudioDevice -Index {device_id} -CommunicationOnly"
+            
+            subprocess.run(['powershell', '-Command', ps_cmd], 
+                          capture_output=True, encoding='utf-8', errors='ignore')
         
         return jsonify({'status': 'success'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-@app.route('/api/media/info', methods=['GET'])
-def get_media_info():
-    """Şu an çalan medya bilgisini al"""
-    try:
-        if IS_WINDOWS:
-            # Windows için Media Session API kullan
-            try:
-                from winsdk.windows.media.control import GlobalSystemMediaTransportControlsSessionManager
-                
-                async def get_media_info_async():
-                    sessions = await GlobalSystemMediaTransportControlsSessionManager.request_async()
-                    current_session = sessions.get_current_session()
-                    if current_session:
-                        info = await current_session.try_get_media_properties_async()
-                        playback = current_session.get_playback_info()
-                        
-                        return {
-                            'title': info.title or '',
-                            'artist': info.artist or '',
-                            'album': info.album_title or '',
-                            'thumbnail': info.thumbnail.to_string() if info.thumbnail else None,
-                            'is_playing': playback.playback_status == 4  # 4 = Playing
-                        }
-                    return None
-                
-                import asyncio
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                media_info = loop.run_until_complete(get_media_info_async())
-                loop.close()
-                
-                if media_info:
-                    return jsonify({
-                        'status': 'success',
-                        'media': media_info
-                    })
-            except Exception as e:
-                print(f"Windows media error: {e}")
-        else:
-            # Linux için playerctl kullan
-            try:
-                result = subprocess.run(['playerctl', 'metadata', '--format', 
-                                       '{{title}}|||{{artist}}|||{{album}}|||{{status}}'],
-                                      capture_output=True, text=True, timeout=2)
-                if result.returncode == 0:
-                    parts = result.stdout.strip().split('|||')
-                    return jsonify({
-                        'status': 'success',
-                        'media': {
-                            'title': parts[0] if len(parts) > 0 else '',
-                            'artist': parts[1] if len(parts) > 1 else '',
-                            'album': parts[2] if len(parts) > 2 else '',
-                            'is_playing': parts[3].lower() == 'playing' if len(parts) > 3 else False,
-                            'thumbnail': None
-                        }
-                    })
-            except:
-                pass
-        
-        return jsonify({
-            'status': 'success',
-            'media': None
-        })
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/media/control', methods=['POST'])
 def media_control():
@@ -606,6 +757,83 @@ def health():
         'version': '1.0.0',
         'os': platform.system()
     })
+
+
+
+
+@app.route('/api/media/info', methods=['GET'])
+def get_media_info():
+    """Şu an çalan medya bilgisini al - TÜRKÇE KARAKTER DESTEĞİ"""
+    try:
+        if IS_WINDOWS:
+            # PowerShell'i UTF-8 ile çalıştır
+            ps_script = """
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | ? { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
+Function Await($WinRtTask, $ResultType) {
+    $asTask = $asTaskGeneric.MakeGenericMethod($ResultType)
+    $netTask = $asTask.Invoke($null, @($WinRtTask))
+    $netTask.Wait(-1) | Out-Null
+    $netTask.Result
+}
+
+[Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager,Windows.Media.Control,ContentType=WindowsRuntime] | Out-Null
+$SessionManager = Await ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager])
+$CurrentSession = $SessionManager.GetCurrentSession()
+
+if ($CurrentSession) {
+    $MediaProperties = Await ($CurrentSession.TryGetMediaPropertiesAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties])
+    $PlaybackInfo = $CurrentSession.GetPlaybackInfo()
+    
+    $result = @{
+        title = $MediaProperties.Title
+        artist = $MediaProperties.Artist
+        album = $MediaProperties.AlbumTitle
+        is_playing = ($PlaybackInfo.PlaybackStatus -eq 4)
+    }
+    
+    $result | ConvertTo-Json -Compress
+}
+"""
+            
+            try:
+                # UTF-8 encoding ile çalıştır
+                result = subprocess.run(
+                    ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                    encoding='utf-8',
+                    errors='replace'  # Decode hatalarını ? ile değiştir
+                )
+                
+                if result.returncode == 0 and result.stdout and result.stdout.strip():
+                    media_data = json.loads(result.stdout.strip())
+                    
+                    return jsonify({
+                        'status': 'success',
+                        'media': {
+                            'title': media_data.get('title', ''),
+                            'artist': media_data.get('artist', ''),
+                            'album': media_data.get('album', ''),
+                            'is_playing': media_data.get('is_playing', False),
+                            'thumbnail': None
+                        }
+                    })
+            except:
+                pass
+        
+        # Medya yok
+        return jsonify({
+            'status': 'success',
+            'media': None
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+
 
 if __name__ == '__main__':
     port = config.get('port', 5000)
